@@ -101,66 +101,132 @@ class Flow:
         bwd_sizes = self.bwd_sizes if self.bwd_sizes else [0]
 
         # TCP flags
-        syn_count = sum(1 for f in self.fwd_flags if f & 0x02)
-        ack_count = sum(1 for f in self.fwd_flags if f & 0x10)
-        fin_count = sum(1 for f in self.fwd_flags if f & 0x01)
-        rst_count = sum(1 for f in self.fwd_flags if f & 0x04)
-        psh_count = sum(1 for f in self.fwd_flags if f & 0x08)
-        urg_count = sum(1 for f in self.fwd_flags if f & 0x20)
+        syn_count  = sum(1 for f in self.fwd_flags if f & 0x02)
+        ack_count  = sum(1 for f in self.fwd_flags if f & 0x10)
+        fin_count  = sum(1 for f in self.fwd_flags if f & 0x01)
+        rst_count  = sum(1 for f in self.fwd_flags if f & 0x04)
+        psh_count  = sum(1 for f in self.fwd_flags if f & 0x08)
+        urg_count  = sum(1 for f in self.fwd_flags if f & 0x20)
+        fwd_psh    = sum(1 for f in self.fwd_flags if f & 0x08)
 
-        # Connection fail ratio (CFR)
-        # A flow with no backward packets indicates a failed connection
+        # Connection fail ratio
         cfr = 1.0 if bwd_count == 0 else 0.0
+
+        # Rates — avoid division by zero
+        duration_safe = duration if duration > 0 else 1e-6
+        flow_bytes_per_s   = (fwd_bytes + bwd_bytes) / duration_safe
+        flow_packets_per_s = total_count / duration_safe
+        fwd_packets_per_s  = fwd_count / duration_safe
+        bwd_packets_per_s  = bwd_count / duration_safe
+
+        # Active and idle times
+        # Active = periods where packets are being sent
+        # Idle = gaps between active periods
+        active_times = []
+        idle_times = []
+        if len(all_timestamps) > 1:
+            gaps = np.diff(sorted(all_timestamps))
+            # Threshold: gaps > 1 second are idle periods
+            IDLE_THRESHOLD = 1.0
+            current_active = 0.0
+            for gap in gaps:
+                if gap < IDLE_THRESHOLD:
+                    current_active += gap
+                else:
+                    if current_active > 0:
+                        active_times.append(current_active)
+                    idle_times.append(gap)
+                    current_active = 0.0
+            if current_active > 0:
+                active_times.append(current_active)
+
+        active_times = active_times if active_times else [0]
+        idle_times   = idle_times   if idle_times   else [0]
+
+        # Init window bytes — first packet size in each direction
+        init_win_fwd = self.fwd_sizes[0] if self.fwd_sizes else 0
+        init_win_bwd = self.bwd_sizes[0] if self.bwd_sizes else 0
+
+        # Down/Up ratio
+        down_up_ratio = bwd_bytes / fwd_bytes if fwd_bytes > 0 else 0
 
         features = {
             # Identity
-            'src_ip': self.src_ip,
-            'dst_ip': self.dst_ip,
-            'src_port': self.src_port,
-            'dst_port': self.dst_port,
-            'protocol': self.protocol,
+            'src_ip':    self.src_ip,
+            'dst_ip':    self.dst_ip,
+            'src_port':  self.src_port,
+            'dst_port':  self.dst_port,
+            'protocol':  self.protocol,
 
             # Temporal
-            'flow_duration': duration,
-            'flow_iat_mean': float(np.mean(iats)),
-            'flow_iat_std': float(np.std(iats)),
-            'flow_iat_max': float(np.max(iats)),
-            'flow_iat_min': float(np.min(iats)),
-            'fwd_iat_mean': float(np.mean(fwd_iats)),
-            'fwd_iat_std': float(np.std(fwd_iats)),
-            'bwd_iat_mean': float(np.mean(bwd_iats)),
-            'bwd_iat_std': float(np.std(bwd_iats)),
+            'flow_duration':    duration,
+            'flow_iat_mean':    float(np.mean(iats)),
+            'flow_iat_std':     float(np.std(iats)),
+            'flow_iat_max':     float(np.max(iats)),
+            'flow_iat_min':     float(np.min(iats)),
+            'fwd_iat_mean':     float(np.mean(fwd_iats)),
+            'fwd_iat_std':      float(np.std(fwd_iats)),
+            'fwd_iat_min':      float(np.min(fwd_iats)),
+            'fwd_iat_max':      float(np.max(fwd_iats)),
+            'bwd_iat_mean':     float(np.mean(bwd_iats)),
+            'bwd_iat_std':      float(np.std(bwd_iats)),
+            'bwd_iat_min':      float(np.min(bwd_iats)),
+            'bwd_iat_max':      float(np.max(bwd_iats)),
+
+            # Active/Idle times
+            'active_mean':  float(np.mean(active_times)),
+            'active_std':   float(np.std(active_times)),
+            'active_max':   float(np.max(active_times)),
+            'active_min':   float(np.min(active_times)),
+            'idle_mean':    float(np.mean(idle_times)),
+            'idle_std':     float(np.std(idle_times)),
+            'idle_max':     float(np.max(idle_times)),
+            'idle_min':     float(np.min(idle_times)),
 
             # Volumetric
-            'total_fwd_packets': fwd_count,
-            'total_bwd_packets': bwd_count,
-            'total_packets': total_count,
-            'total_fwd_bytes': fwd_bytes,
-            'total_bwd_bytes': bwd_bytes,
-            'fwd_packet_length_mean': float(np.mean(fwd_sizes)),
-            'fwd_packet_length_std': float(np.std(fwd_sizes)),
-            'fwd_packet_length_max': float(np.max(fwd_sizes)),
-            'fwd_packet_length_min': float(np.min(fwd_sizes)),
-            'bwd_packet_length_mean': float(np.mean(bwd_sizes)),
-            'bwd_packet_length_std': float(np.std(bwd_sizes)),
-            'bwd_packet_length_max': float(np.max(bwd_sizes)),
-            'bwd_packet_length_min': float(np.min(bwd_sizes)),
-            'packet_length_mean': float(np.mean(all_sizes)),
-            'packet_length_std': float(np.std(all_sizes)),
+            'total_fwd_packets':        fwd_count,
+            'total_bwd_packets':        bwd_count,
+            'total_packets':            total_count,
+            'total_fwd_bytes':          fwd_bytes,
+            'total_bwd_bytes':          bwd_bytes,
+            'fwd_packet_length_mean':   float(np.mean(fwd_sizes)),
+            'fwd_packet_length_std':    float(np.std(fwd_sizes)),
+            'fwd_packet_length_max':    float(np.max(fwd_sizes)),
+            'fwd_packet_length_min':    float(np.min(fwd_sizes)),
+            'bwd_packet_length_mean':   float(np.mean(bwd_sizes)),
+            'bwd_packet_length_std':    float(np.std(bwd_sizes)),
+            'bwd_packet_length_max':    float(np.max(bwd_sizes)),
+            'bwd_packet_length_min':    float(np.min(bwd_sizes)),
+            'packet_length_mean':       float(np.mean(all_sizes)),
+            'packet_length_std':        float(np.std(all_sizes)),
+            'packet_length_variance':   float(np.var(all_sizes)),
+            'max_packet_length':        float(np.max(all_sizes)),
+            'avg_bwd_segment_size':     float(np.mean(bwd_sizes)),
+            'avg_fwd_segment_size':     float(np.mean(fwd_sizes)),
+            'average_packet_size':      float(np.mean(all_sizes)),
+
+            # Rates
+            'flow_bytes_per_s':     flow_bytes_per_s,
+            'flow_packets_per_s':   flow_packets_per_s,
+            'fwd_packets_per_s':    fwd_packets_per_s,
+            'bwd_packets_per_s':    bwd_packets_per_s,
 
             # Connection behaviour
-            'syn_flag_count': syn_count,
-            'ack_flag_count': ack_count,
-            'fin_flag_count': fin_count,
-            'rst_flag_count': rst_count,
-            'psh_flag_count': psh_count,
-            'urg_flag_count': urg_count,
+            'syn_flag_count':       syn_count,
+            'ack_flag_count':       ack_count,
+            'fin_flag_count':       fin_count,
+            'rst_flag_count':       rst_count,
+            'psh_flag_count':       psh_count,
+            'urg_flag_count':       urg_count,
+            'fwd_psh_flags':        fwd_psh,
             'connection_fail_ratio': cfr,
+            'init_win_bytes_forward':  init_win_fwd,
+            'init_win_bytes_backward': init_win_bwd,
 
             # Relational
             'fwd_bwd_packet_ratio': fwd_count / bwd_count if bwd_count > 0 else fwd_count,
-            'fwd_bwd_bytes_ratio': fwd_bytes / bwd_bytes if bwd_bytes > 0 else fwd_bytes,
-            'down_up_ratio': bwd_bytes / fwd_bytes if fwd_bytes > 0 else 0,
+            'fwd_bwd_bytes_ratio':  fwd_bytes / bwd_bytes if bwd_bytes > 0 else fwd_bytes,
+            'down_up_ratio':        down_up_ratio,
         }
 
         return features
